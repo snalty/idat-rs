@@ -66,7 +66,7 @@ pub enum FieldValue {
     MidBlock,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct FieldDef {
     pub field_type: FieldType,
     pub byte_offset: u64,
@@ -75,7 +75,7 @@ pub struct FieldDef {
 #[derive(Debug)]
 pub struct Field {
     pub field_type: FieldType,
-    pub value: FieldValue
+    pub value: FieldValue,
 }
 
 #[cfg(test)]

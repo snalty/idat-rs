@@ -1,21 +1,23 @@
 use std::any::Any;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Iter, Path};
 
-use fields::{FieldFormat, FieldType};
+use fields::{Field, FieldDef, FieldFormat, FieldType, FieldValue};
 
 mod errors;
 mod fields;
 
 #[derive(Debug)]
 pub struct Record {
-    fields: Vec<fields::Field>
+    pub data: Vec<fields::Field>,
+    pub fields: Vec<fields::FieldDef>,
 }
 
 pub struct Reader {
     inner: BufReader<File>,
     fields: Vec<fields::FieldDef>,
+    snp_count: u32
 }
 
 impl Reader {
@@ -25,14 +27,24 @@ impl Reader {
 
         let mut version_buf = [0u8; 8];
         inner.read_exact(&mut version_buf)?;
-        println!("{:?}", version_buf);
+
         let _version = u64::from_le_bytes(version_buf);
 
         let fields = Self::get_fields(&mut inner)?;
 
-        println!("{:?}", fields);
+        let mut snp_count_buf = [0u8; 4];
+        inner.seek(SeekFrom::Start(
+            fields
+                .iter()
+                .find(|f| f.field_type == FieldType::SNPCount)
+                .unwrap()
+                .byte_offset,
+        ))?;
+        inner.read_exact(&mut snp_count_buf);
 
-        Ok(Reader { inner, fields })
+        let snp_count = u32::from_le_bytes(snp_count_buf);
+
+        Ok(Reader { inner, fields, snp_count })
     }
 
     fn get_fields(
@@ -54,7 +66,7 @@ impl Reader {
         let mut field_code_buf = [0u8; 2];
         inner.read_exact(&mut field_code_buf)?;
         let field_code = u16::from_le_bytes(field_code_buf);
-        println!("{:?}", field_code);
+
         let field_type = match fields::FieldType::try_from(field_code as usize) {
             Ok(f) => f,
             Err(_) => fields::FieldType::Unknown,
@@ -77,7 +89,7 @@ impl Reader {
 
         match String::from_utf8(string_header.to_vec()) {
             Ok(s) => match s.as_str() {
-                "IDAT" => println!("{}", s),
+                "IDAT" => (),
                 _ => return Err(errors::ReaderError::InvalidHeader { actual: s }),
             },
             Err(_) => {
@@ -89,60 +101,74 @@ impl Reader {
 
         Ok(())
     }
+
+    fn field_iter(&mut self, field: fields::FieldType) -> Result<FieldIterator, errors::ReaderError> {
+        match field {
+            FieldType::IlluminaID | FieldType::SD | FieldType::Mean | FieldType::BeadCounts => (),
+            _ => return Err(errors::ReaderError::FieldNotIterable)
+        }
+
+        let field_def = match self.fields.iter().find(|f| f.field_type == field) {
+            Some(&field) => field,
+            None => return Err(errors::ReaderError::MissingField { field })
+        };
+
+        return Ok(FieldIterator::new(self, field_def))
+    }
 }
 
-impl Iterator for Reader {
-    type Item = Record;
+struct FieldIterator<'a> {
+    reader: &'a mut Reader,
+    field_def: FieldDef,
+    returned: usize,
+    offset: u64,
+}
+
+impl <'a> FieldIterator<'_> {
+    pub fn new(mut reader: &'a mut Reader, field_def: FieldDef) -> FieldIterator<'a> {
+        FieldIterator{ 
+            reader,
+            field_def,
+            returned: 0,
+            offset: field_def.byte_offset
+        }
+    }
+}
+
+
+impl Iterator for FieldIterator<'_> {
+    type Item = FieldValue;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.inner.fill_buf().unwrap().is_empty() {
+        if self.returned > self.reader.snp_count as usize {
             return None
         };
 
-        let mut fields: Vec<fields::Field> = Vec::with_capacity(self.fields.capacity());
-        for field in &self.fields {
-            match field.field_type.get_data_type() {
-                FieldFormat::Int => {
-                    let mut buf = [0u8; 4];
-                    self.inner.read_exact(&mut buf).unwrap();
-
-                    fields.push(
-                        fields::Field {
-                            field_type: field.field_type,
-                            value: fields::FieldValue::Int(i32::from_le_bytes(buf))
-                        }
-                    )
-                },
-                FieldFormat::Long => {
-                    let mut buf = [0u8; 8];
-                    self.inner.read_exact(&mut buf).unwrap();
-
-                    fields.push(
-                        fields::Field {
-                            field_type: field.field_type,
-                            value: fields::FieldValue::Long(i64::from_le_bytes(buf))
-                        }
-                    )
-                },
-                FieldFormat::Short => {
-                    let mut buf = [0u8; 2];
-                    self.inner.read_exact(&mut buf).unwrap();
-
-                    fields.push(
-                        fields::Field {
-                            field_type: field.field_type,
-                            value: fields::FieldValue::Short(u16::from_le_bytes(buf))
-                        }
-                    )
+        self.returned += 1;
+         
+        // Make sure we are at the correct place in the file.
+        match self.reader.inner.stream_position() {
+            Ok(pos) => {
+                if pos != self.offset {
+                    self.reader.inner.seek(SeekFrom::Start(self.offset)).unwrap();
                 }
-                _ => ()
-            }
-        };
-        Some(
-            Record {
-            fields
+            },
+            Err(e) => return None
         }
-    )
+
+        let value = match self.field_def.field_type.get_data_type() {
+            FieldFormat::Int => {
+                let mut buf = [0u8; 4];
+                self.reader.inner.read_exact(&mut buf).unwrap();
+                Some(FieldValue::Int(i32::from_le_bytes(buf)))
+            },
+            _ => todo!("Other fields not yet implemented")
+        };
+
+        self.offset = self.reader.inner.stream_position().expect("valid reader");
+        self.returned += 1;
+
+        value
     }
 }
 
@@ -169,7 +195,8 @@ mod tests {
     fn test_determine_file_type() -> Result<(), errors::ReaderError> {
         let path = Path::new("/Users/samnalty/Developer/idat-rs/200144450018_R04C01_Red.idat");
         let mut reader = Builder::from_path(path)?;
-        println!("{:?}", reader.next());
+        let record: Vec<FieldValue> = reader.field_iter(FieldType::IlluminaID)?.collect();
+        println!("{:?}", record);
         Ok(())
     }
 }

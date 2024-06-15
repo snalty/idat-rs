@@ -80,8 +80,6 @@ pub struct Field {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, path::Path};
-
     use super::*;
 
     #[test]

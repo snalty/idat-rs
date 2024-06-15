@@ -1,9 +1,8 @@
-use std::any::Any;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Iter, Path};
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
 
-use fields::{Field, FieldDef, FieldFormat, FieldType, FieldValue};
+use fields::{FieldDef, FieldFormat, FieldType, FieldValue};
 
 mod errors;
 mod fields;
@@ -40,7 +39,7 @@ impl Reader {
                 .unwrap()
                 .byte_offset,
         ))?;
-        inner.read_exact(&mut snp_count_buf);
+        inner.read_exact(&mut snp_count_buf)?;
 
         let snp_count = u32::from_le_bytes(snp_count_buf);
 
@@ -125,7 +124,7 @@ struct FieldIterator<'a> {
 }
 
 impl <'a> FieldIterator<'_> {
-    pub fn new(mut reader: &'a mut Reader, field_def: FieldDef) -> FieldIterator<'a> {
+    pub fn new(reader: &'a mut Reader, field_def: FieldDef) -> FieldIterator<'a> {
         FieldIterator{ 
             reader,
             field_def,
@@ -153,7 +152,7 @@ impl Iterator for FieldIterator<'_> {
                     self.reader.inner.seek(SeekFrom::Start(self.offset)).unwrap();
                 }
             },
-            Err(e) => return None
+            Err(_) => return None
         }
 
         let value = match self.field_def.field_type.get_data_type() {

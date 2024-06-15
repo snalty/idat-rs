@@ -1,7 +1,7 @@
 use std::io;
 use thiserror::Error;
 
-use crate::fields::{Field, FieldType};
+use crate::fields::FieldType;
 
 #[derive(Error, Debug)]
 pub enum ReaderError {
